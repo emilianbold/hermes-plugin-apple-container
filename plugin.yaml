@@ -1,0 +1,87 @@
+name: apple_container
+label: Apple Container
+kind: backend
+version: 0.4.1
+manifest_version: 2
+author: Emilian Bold
+description: >
+  Apple container (github.com/apple/container) terminal backend for Hermes
+  Agent on Apple silicon Macs: Hermes stays on the Mac while the terminal,
+  file and code tools run inside a lightweight Linux VM, so the agent cannot
+  touch the Mac beyond the folders the user explicitly shares. Shares nothing
+  of the host by default; optional per-folder read-write or read-only
+  virtiofs shares (approval prompts stay on while anything is shared);
+  persistent named volumes (the sandbox is stopped, not deleted, while idle)
+  or a fresh VM per session.
+  Select it with `terminal.backend: apple_container`. An option saved in this
+  form wins; one left untouched here is read from `terminal.apple_container_*`
+  in config.yaml when it is set there (the form then still shows the
+  default; `hermes doctor` shows what is in effect).
+platforms: [macos]
+requires_hermes: ">=0.23.0"
+provides_tools: []
+provides_hooks: []
+# The form in Hermes Desktop (Settings > Plugins). Stored under
+# plugins.entries.apple_container.settings; resolved in settings.py, whose
+# FORM_KEYS is this same list (tests/test_settings.py compares them).
+config_schema:
+  image:
+    type: str
+    default: nousresearch/hermes-sandbox:desktop
+    label: Image
+    description: "Container image the sandbox is made from. Exposes nothing of this Mac. Changing it replaces the sandbox; its volumes are kept."
+  volumes:
+    type: list
+    default: []
+    label: Shared folders
+    description: "Folders of this Mac the sandbox can reach, as a JSON list such as [\"/Users/you/project:/project\"]; end an entry with :ro for read-only. The agent's commands can read everything in a shared folder, and change it unless it is read-only. Approval prompts stay on while a folder is shared. A bare name (\"data:/data\") is a volume inside the sandbox and shares nothing, but cannot be attached to two running sandboxes at once — share a Mac folder when several run at the same time."
+  mount_cwd:
+    type: bool
+    default: false
+    label: Share the launch directory
+    description: "Share the folder Hermes was started from, read-write, at /workspace. The agent's commands can read and change everything in that folder of this Mac. Approval prompts stay on."
+  mount_hermes_files:
+    type: list
+    default: []
+    label: Hermes files to share
+    description: "Hermes' own files to show read-only at /root/.hermes, as a JSON list of \"skills\", \"cache\" (files attached in chat, screenshots) and \"credentials\" (credential files your skills registered). A command in the sandbox can read them and, with network access, send them elsewhere. Approval prompts stay on while any is shared."
+  forward_env:
+    type: list
+    default: []
+    label: Forwarded environment variables
+    description: "Names of environment variables whose values are copied from Hermes on this Mac into the sandbox, as a JSON list such as [\"GH_TOKEN\"]. Every command there can read them, so forward a key only if the agent may use it."
+  env:
+    type: dict
+    default: {}
+    label: Environment variables
+    description: "Variables set inside the sandbox, as a JSON object such as {\"EDITOR\": \"vim\"}. Exposes nothing of this Mac beyond the values typed here."
+  network:
+    type: str
+    default: default
+    label: Network
+    description: "Container network. \"default\" gives the sandbox internet access and lets it reach services on this Mac at the network's gateway address. \"none\" gives it no network at all. Or the name of a network you created with the container CLI."
+  user:
+    type: str
+    default: ""
+    label: User
+    description: "User the agent's commands run as inside the sandbox; empty means root. Exposes nothing of this Mac (a file written into a shared folder belongs to your Mac user either way)."
+  shm_size:
+    type: str
+    default: 1g
+    label: Shared memory size
+    description: "Size of /dev/shm in the sandbox, for example 1g (browsers need more than the runtime's 64 MB). Uses this Mac's memory; exposes nothing."
+  container_persistent:
+    type: bool
+    default: true
+    label: One sandbox for all sessions
+    description: "true keeps one sandbox for every session of this Hermes home: files and installed packages survive, but the sessions share the sandbox and are not isolated from each other. false gives each session (and each sub-agent session) its own container, deleted when it closes; nothing carries over. Hermes' own terminal.container_persistent key still applies when this is not set here. Exposes nothing of this Mac."
+  keep_running:
+    type: bool
+    default: false
+    label: Keep running
+    description: "Leave the sandbox running when Hermes is done with it, for a server you keep inside. Off: an idle sandbox is stopped (kept, not deleted) and started again by the next command. A running sandbox holds its memory on this Mac."
+  extra_args:
+    type: list
+    default: []
+    label: Extra arguments
+    description: "Extra arguments for `container run`, as a JSON list with one string per argument, such as [\"--read-only\"]. They can undo the isolation: a mount or --ssh gives the sandbox part of this Mac, and approval prompts then stay on."
