@@ -12,6 +12,10 @@ used for development). On any other machine the backend reports itself
 unavailable. Not related to, and sharing no code with, the separate idea of
 running all of Hermes inside a container.
 
+**This is an unofficial community plugin.** It is not made, endorsed or
+supported by Apple or by Nous Research. `container` is Apple's tool; the
+plugin drives the copy you installed and includes none of it.
+
 ## What it does
 
 - One long-lived container per sandbox, reused across tool calls, Hermes
@@ -51,17 +55,13 @@ running all of Hermes inside a container.
 ## Install
 
 ```bash
-git clone https://github.com/emilianbold/hermes-plugin-apple-container
-hermes plugins install file://$PWD/hermes-plugin-apple-container --yes-deps --enable
+hermes plugins install emilianbold/hermes-plugin-apple-container --enable
 hermes config set terminal.backend apple_container
 ```
 
-For development, a symlink works too:
-
-```bash
-mkdir -p ~/.hermes/plugins && ln -s "$HOME/hermes-plugin-apple-container" ~/.hermes/plugins/apple_container
-hermes plugins enable apple_container
-```
+In Hermes Desktop: Capabilities → Plugins → Install from Git, and paste
+`https://github.com/emilianbold/hermes-plugin-apple-container`; then choose
+the backend with the `hermes config set` line above.
 
 The container system service must be running (the plugin never starts it for
 you):
@@ -145,10 +145,12 @@ Keys as written under `terminal:`; in the plugin's own settings, drop the
 | `apple_container_image` | `nousresearch/hermes-sandbox:desktop` | image reference; `TERMINAL_APPLE_CONTAINER_IMAGE` env var is the fallback. Short and registry-qualified names are the same image (`debian` = `docker.io/library/debian:latest`); with another default registry configured in the CLI, write the full reference |
 | `apple_container_volumes` | `[]` | opt-in shares, a list of `"source:/path/in/sandbox[:ro]"`. `source` is an absolute Mac folder (`~` is expanded) or a bare name for a named volume. See "Rules for shares" |
 | `apple_container_mount_cwd` | `false` | mount the directory Hermes was launched from into `/workspace` (the `docker_mount_cwd_to_workspace` equivalent); with persistent volumes on, the workspace volume is skipped in favour of it |
-| `apple_container_forward_env` | `[]` | allow-list of variable names forwarded into the sandbox, taken from Hermes' environment or, if absent there, from the Hermes `.env` (values never appear on any command line). Must be a list; names are trimmed; anything else is ignored with a warning |
+| `apple_container_forward_env` | `[]` | allow-list of variable names forwarded into the sandbox. Each is asked of Hermes itself (the active profile's `.env`, then Hermes' environment); the plugin does not read the `.env` file, and values never appear on any command line. Must be a list; names are trimmed; anything else is ignored with a warning |
 | `apple_container_env` | `{}` | literal `NAME: value` pairs set inside the sandbox; a key that is not a variable name is dropped with a warning |
 | `apple_container_mount_hermes_files` | `false` | share Hermes' own files read-only at `/root/.hermes`: `true` for all, or a list of `skills`, `cache` (files attached in chat, screenshots), `credentials` (files your skills declare; staged, see below). Off by default; without `cache`, a file you attach in chat is not visible to commands in the sandbox |
 | `apple_container_shm_size` | `1g` | `/dev/shm` size (the runtime's default 64 MB is too small for browsers) |
+| `apple_container_memory` | `0` | RAM ceiling of each sandbox VM in MB. `0` keeps what Hermes hands down (5120 today); e.g. `98304` gives 96 GB. A ceiling, not a reservation. Wins over Hermes' `container_memory` — the `TERMINAL_CONTAINER_MEMORY` env plumbing does not reliably reach a multiplexed gateway (measured); this is the dependable place |
+| `apple_container_cpus` | `0` | CPU cores per sandbox VM. `0` keeps Hermes' value (1 today); e.g. `16` on an 18-core Mac leaves 2 for the host. Wins over Hermes' `container_cpu` the same way |
 | `apple_container_user` | *(root)* | `container exec -u` user for commands |
 | `apple_container_network` | `default` | container network name. `none` gives the sandbox **no network at all** (only the loopback interface; measured). For no internet but a reachable Mac, create a host-only network yourself (`container network create --internal <name>`) and name it here. A change is applied to an existing sandbox (it is replaced; volumes are kept) |
 | `apple_container_keep_running` | `false` | `true` leaves a persistent sandbox running when Hermes is done with it, for a server you keep running inside. By default an idle sandbox is stopped (not deleted) and started again by the next command; see "Idle stop". Must be `true` or `false`; anything else stops the sandbox from starting |
@@ -223,6 +225,13 @@ isolation. The plugin reads it with a table of the CLI's flags:
   replaced; volumes are kept).
 
 ### Credential files
+
+This is the one place where the plugin reads a credential file, and it does so
+only when you turn it on. The setting is off by default. The list of files
+comes from Hermes (the files your skills registered, plus
+`terminal.credential_files`), the same list the built-in Docker backend
+mounts; the plugin adds none itself. Hermes refuses to let a skill register
+its `.env` or `auth.json`, which hold the model-provider keys.
 
 With `credentials` in `apple_container_mount_hermes_files`, each credential
 file registered by your skills (or listed in `terminal.credential_files`) is
@@ -325,7 +334,11 @@ done with it and no other living Hermes process uses it.
 **Protected:** the agent's commands and file tools run inside a Linux VM with
 its own filesystem. Nothing on your Mac is reachable unless you shared it, and
 shared folders can be read-only (`:ro` is enforced by virtiofs). No host
-environment, SSH agent or ports leak in by default. Dangerous-command
+environment, SSH agent or ports leak in by default. The `container` CLI itself
+is started with a short environment (`PATH`, `HOME`, the locale and time zone,
+proxy settings and its own `CONTAINER_*` variables), not Hermes' own, so it
+never holds your provider keys; a variable you put on the forward list reaches
+only the one call that passes it on. Dangerous-command
 approval prompts stay ON whenever anything of the Mac is shared (they are
 skipped when nothing is shared, matching the Docker backend's behaviour).
 
@@ -359,71 +372,14 @@ skipped when nothing is shared, matching the Docker backend's behaviour).
 - Concurrent commands share one container (like the Docker backend); heavy
   parallel use was not stress-tested.
 
-## Changes in 0.4.0 that you may notice
-
-- `container_persistent` ("One sandbox for all sessions") can now be set in
-  the Desktop form. A value saved there wins over Hermes' own
-  `terminal.container_persistent` key; a value that is not `true` or `false`
-  is refused. There is no `terminal.apple_container_container_persistent`
-  key — write the core key or use the form.
-
-## Changes in 0.3.0 that you may notice
-
-- **Settings have a form in Hermes Desktop**, stored in the plugin's own
-  settings. The `terminal.apple_container_*` keys keep working; see "Where a
-  setting is written" for which place wins and what the form does not show.
-- **Settings that used to be skipped now stop the sandbox from starting**,
-  with an error that names the key: a `terminal.apple_container_*` key the
-  backend does not have (a misspelt key was ignored, so a misspelt
-  `apple_container_network: none` left the network on); a key with no value
-  (what `hermes config set terminal.apple_container_network none` writes: it
-  was read as "not set", and the network stayed on); and an
-  `apple_container_mount_cwd` that is not `true` or `false` (the text
-  `"false"` used to share the launch directory).
-- `hermes doctor` has two more lines: the settings error, if there is one,
-  and what of the Mac is shared and where that is written.
-- **A persistent sandbox no longer keeps running when Hermes is done with
-  it.** It is stopped (kept, with its volumes) and started again by the next
-  command, which then takes about a second longer. Processes you left
-  running inside are gone after a stop. `apple_container_keep_running: true`
-  brings the earlier behaviour back.
-- At its first sandbox start, a Hermes process stops running persistent
-  sandboxes of its home that no living Hermes process holds. A Hermes still
-  running plugin 0.2.0 holds no lease on its persistent sandbox: restart it
-  after updating, or its sandbox is stopped under it by a newer process (its
-  next command starts it again).
-- Fixed: with several environments sharing one non-persistent container, a
-  cleanup running while another Hermes home was in effect (one gateway
-  serving several profiles) looked for the other users in the wrong home and
-  could delete the container they were using.
-
-## Changes in 0.2.0 that you may notice
-
-Settings that used to be accepted and now stop the sandbox from starting,
-with an error that names the entry:
-
-- a volume with a relative source (`./d`, `d/`, `.`), an empty source or a
-  relative target; a suffix other than `:ro` / `:rw`; a source that is a
-  single file; two mounts on one path; a `apple_container_volumes` value that
-  is not a list of strings (such entries used to be skipped, or — relative
-  sources — mounted read-write while approvals were off);
-- `apple_container_extra_args` that is not a list of strings, or contains
-  `--name`, `--rm`, `--entrypoint`, `-i`, `-t`, `--`, a `hermes-` label or a
-  bare word.
-
-Other changes: approval prompts now also stay on for mounts and `--ssh` in
-the extra arguments and for `~` sources; a sandbox is no longer rebuilt at
-every new session because of the image name, and is rebuilt when the network
-or extra arguments change; `container run` gets `--init --entrypoint env`
-(existing sandboxes pick this up when they are next replaced); credential
-files are staged; `apple_container_forward_env` given as a string is ignored
-(it used to forward one-letter names) and falls back to the Hermes `.env`.
-
 ## What was checked, and with which versions
 
 Verified against the **real runtime** (macOS 26.7.1, Apple silicon,
 `container` CLI 1.2.2, Hermes v0.23.1 at commit 3b4215785):
 
+- Isolation, shares, persistence, cleanup and the settings, by two scripts in
+  the development repository that start real sandboxes and compare what the
+  sandbox and the Mac each see.
 - The facts the rules are built on: how `-v` reads relative, `~`, empty and
   suffixed specs; what `inspect` reports for images, mounts and networks; the
   error texts for missing and stopped containers; `kill` and `delete --force`;
@@ -433,13 +389,13 @@ Verified against the **real runtime** (macOS 26.7.1, Apple silicon,
 - `container run IMAGE args` keeps the image ENTRYPOINT and passes args as
   CMD (Docker semantics) — which is why the backend sets the entrypoint.
 
-Checked only against a scripted stand-in for the CLI (not the real runtime):
+Checked only against the fake CLI (not the real runtime):
 
 - The exact argv of every CLI call (labels, mounts, resources, ports).
 - Cleanup when `container stop` fails (the fallback's commands were each run
   by hand on the real CLI; a real VM that refuses to stop was not produced).
 - An environment attaching while another process is in the middle of
-  stopping the sandbox (the lock).
+  stopping the sandbox (the lock; a unit test slows the fake's `stop`).
 - Refresh of a staged credential while a real sandbox runs (measured by hand
   on the CLI, see above; not in a script).
 - Images *without* GNU timeout (the pkill-fallback path).
@@ -448,7 +404,7 @@ Checked only against a scripted stand-in for the CLI (not the real runtime):
 Not checked:
 
 - The form as drawn by the Hermes Desktop app. What was run is the gateway
-  method the app calls (`plugins.manage`: the list with this plugin's 12
+  method the app calls (`plugins.manage`: the list with this plugin's 11
   fields, and a save), and the app's source was read (it renders `str` as a
   text field, `bool` as a switch, `list` and `dict` as a JSON text area, and
   its filter for that page keeps a plugin installed by the user). The app
@@ -466,8 +422,8 @@ Not checked:
   and unit-tested; a real Bot Desktop session was not run).
 - Concurrent/parallel commands under load; `container cp`; Rosetta.
 - Intel Macs, other macOS versions, other `container` CLI versions.
-- The `hermes plugins install file://…` path was validated with
-  `hermes plugins validate` but a packaged install was not round-tripped.
+- A packaged install (`hermes plugins install`) was checked with
+  `hermes plugins validate` but not round-tripped.
 
 ## License
 

@@ -1,7 +1,7 @@
 name: apple_container
 label: Apple Container
 kind: backend
-version: 0.4.1
+version: 0.5.0
 manifest_version: 2
 author: Emilian Bold
 description: >
@@ -80,6 +80,16 @@ config_schema:
     default: false
     label: Keep running
     description: "Leave the sandbox running when Hermes is done with it, for a server you keep inside. Off: an idle sandbox is stopped (kept, not deleted) and started again by the next command. A running sandbox holds its memory on this Mac."
+  memory:
+    type: int
+    default: 0
+    label: Memory (MB)
+    description: "RAM ceiling of each sandbox VM in MB. 0 keeps whatever Hermes hands down (5120 today); a value like 98304 gives the sandbox that much. Uses this Mac's memory as a ceiling the VM may fill — not a reservation."
+  cpus:
+    type: int
+    default: 0
+    label: CPU cores
+    description: "CPU cores available to each sandbox VM. 0 keeps Hermes' value (1 today); e.g. 16 on an 18-core Mac leaves 2 for the host. Values are ceilings, not reservations."
   extra_args:
     type: list
     default: []

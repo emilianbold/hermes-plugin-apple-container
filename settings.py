@@ -58,6 +58,8 @@ FORM_KEYS: dict[str, type] = {
     "shm_size": str,
     "keep_running": bool,
     "container_persistent": bool,
+    "memory": int,
+    "cpus": int,
     "extra_args": list,
 }
 
@@ -206,6 +208,11 @@ def _checked_form_value(key: str, kind: type, value: Any) -> Any:
             if item is not None and not isinstance(item, (str, int, float, bool)):
                 raise _Refused(f"{place}: the value of {name} must be text or a number, "
                                f"got {item!r}")
+    elif key in ("memory", "cpus"):
+        # 0 means "use what Hermes hands down"; a positive value overrides it.
+        if value < 0 or (key == "cpus" and value > 256) or (key == "memory" and value > 4 * 1024 * 1024):
+            raise _Refused(f"{place} must be 0 (use Hermes' value) or a resource amount in "
+                           f"{'MB' if key == 'memory' else 'cores'}, got {value!r}")
     return value
 
 
@@ -226,6 +233,14 @@ def _check_effective(values: Mapping[str, Any], sources: Mapping[str, str]) -> N
         name = PREFIX + key
         if name in values and not isinstance(values[name], bool):
             raise _Refused(f"{sources[name]} must be true or false, got {values[name]!r}")
+    for key in ("memory", "cpus"):
+        name = PREFIX + key
+        if name in values:
+            value = values[name]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise _Refused(f"{sources[name]} must be a whole number of "
+                               f"{'MB' if key == 'memory' else 'cores'} (0 = Hermes' own value), "
+                               f"got {value!r}")
     for key, parse in (("volumes", parse_volumes), ("extra_args", parse_extra_args)):
         name = PREFIX + key
         if name in values:

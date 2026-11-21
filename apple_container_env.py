@@ -46,9 +46,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from tools.environments.base import BaseEnvironment, EnvironmentConnectionError
-from tools.environments.base_output import _popen_bash
 
-from .provider import find_container_executable, hermes_mount_kinds, unsupported_host_reason
+from .provider import cli_env, find_container_executable, hermes_mount_kinds, unsupported_host_reason
 from .settings import ENV_NAME_RE as _ENV_NAME_RE
 from .specs import ExtraArgs, Mount, SpecError, parse_extra_args, parse_volumes, same_image
 
@@ -142,10 +141,11 @@ def _format_cpus(cpu: Any) -> Optional[str]:
 def run_capture(argv: list[str], *, timeout: float, env: dict | None = None,
                 check: bool = False) -> subprocess.CompletedProcess:
     """``subprocess.run`` with text capture and stdin closed (a CLI that
-    prompts must never hang the agent)."""
+    prompts must never hang the agent). The program gets the short
+    environment of ``cli_env()`` unless *env* is given, never Hermes' own."""
     return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout, check=check,
-                          stdin=subprocess.DEVNULL, env=env)
+                          stdin=subprocess.DEVNULL, env=cli_env() if env is None else env)
 
 
 def bash_argv(cmd_string: str, login: bool = False) -> list[str]:
@@ -184,15 +184,56 @@ def _host_timezone() -> Optional[str]:
         return None
 
 
-def _client_env(values: dict[str, str]) -> Optional[dict[str, str]]:
-    """Process env overlay carrying forwarded values for the CLI subprocess
-    (paired with name-only ``-e KEY`` flags so values never appear in the
-    world-readable command line); ``None`` = inherit when empty."""
-    if not values:
-        return None
-    merged = os.environ.copy()
-    merged.update(values)
-    return merged
+def _feed_stdin(proc: subprocess.Popen, data: str) -> None:
+    """Write *data* to the process's stdin from a thread, then close it. A
+    thread, because a file larger than the pipe buffer would otherwise block
+    against output nobody is reading yet. The bytes are UTF-8 we encode
+    ourselves (``surrogateescape``, the inverse of how output is decoded).
+    Stdin is closed whatever happens, so the command sees end-of-input; a
+    failed write is left on the process for Hermes to report as
+    ``stdin_error``, and the thread for it to join before it reads that."""
+    errors: list[BaseException] = []
+
+    def write() -> None:
+        target = getattr(proc.stdin, "buffer", proc.stdin)
+        try:
+            raw = data.encode("utf-8", "surrogateescape")
+            if target.write(raw) != len(raw):
+                raise RuntimeError("short write to the command's stdin")
+        except OSError:
+            pass  # the command exited or closed stdin without reading it all
+        except Exception as exc:  # text with no UTF-8 form
+            errors.append(exc)
+        finally:
+            try:
+                target.close()
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=write, daemon=True)
+    proc._hermes_stdin_errors = errors  # type: ignore[attr-defined]
+    proc._hermes_stdin_thread = thread  # type: ignore[attr-defined]
+    thread.start()
+
+
+def _start_exec(argv: list[str], stdin_data: Optional[str],
+                env: dict[str, str]) -> subprocess.Popen:
+    """Start one `container exec` with its output on a single pipe and, when
+    there is input, stdin fed by ``_feed_stdin``; no stdin at all otherwise."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            stdin=subprocess.PIPE if stdin_data is not None
+                            else subprocess.DEVNULL,
+                            text=True, encoding="utf-8", errors="replace", env=env)
+    if stdin_data is not None:
+        _feed_stdin(proc, stdin_data)
+    return proc
+
+
+def _client_env(values: dict[str, str]) -> dict[str, str]:
+    """The CLI subprocess's environment: the short list of ``cli_env()`` plus
+    the forwarded values (paired with name-only ``-e KEY`` flags so values
+    never appear in the world-readable command line)."""
+    return cli_env(values)
 
 
 class AppleContainerConfigError(EnvironmentConnectionError):
@@ -354,15 +395,19 @@ def _literal_env(value: Any) -> dict[str, str]:
     return pairs
 
 
-def _hermes_dotenv() -> dict[str, str]:
-    """``<HERMES_HOME>/.env`` values, or ``{}``; a broken file must not stop
-    the sandbox."""
+def _forwarded_value(name: str) -> Optional[str]:
+    """The value of one variable the user put on the forward list, asked of
+    Hermes itself: ``get_secret`` answers from the active profile's ``.env``,
+    then the process environment, and under several profiles never with
+    another profile's value. The plugin does not read the ``.env`` file.
+    A lookup Hermes refuses skips the variable; the sandbox still starts."""
     try:
-        from hermes_cli.config import load_env
-        return dict(load_env() or {})
-    except Exception:
-        logger.debug("apple_container: could not read the Hermes .env", exc_info=True)
-        return {}
+        from agent import secret_scope
+        return secret_scope.get_secret(name)
+    except Exception as exc:
+        logger.warning("apple_container: forward-env %s could not be looked up (%s); "
+                       "it is not forwarded", name, exc)
+        return None
 
 
 def _state_dir() -> Path:
@@ -664,8 +709,19 @@ class AppleContainerEnvironment(BaseEnvironment):
         super().__init__(cwd=cwd, timeout=timeout)
         self._task_id = task_id
         self._image = image
-        self._cpu = cc.get("container_cpu", 1)
-        self._memory = cc.get("container_memory", 5120)
+        # The plugin's own memory/cpus settings win over core's
+        # container_config: Hermes routes the TERMINAL_CONTAINER_* env vars
+        # through plumbing a multiplexed gateway does not reliably deliver
+        # (measured), so the form is the dependable place to set resources.
+        # 0 (the default) keeps what Hermes hands down.
+        memory_override = terminal.get("apple_container_memory", 0)
+        cpu_override = terminal.get("apple_container_cpus", 0)
+        self._memory = (memory_override if isinstance(memory_override, int)
+                        and not isinstance(memory_override, bool) and memory_override > 0
+                        else cc.get("container_memory", 5120))
+        self._cpu = (cpu_override if isinstance(cpu_override, int)
+                     and not isinstance(cpu_override, bool) and cpu_override > 0
+                     else cc.get("container_cpu", 1))
         self._disk = cc.get("container_disk", 51200)
         # container_persistent is core's terminal key (Docker uses it too),
         # handed on by core as container_config; a value saved in the form
@@ -1143,13 +1199,8 @@ class AppleContainerEnvironment(BaseEnvironment):
         values: dict[str, str] = {}
         if tz := _host_timezone():
             values["TZ"] = tz
-        dotenv: Optional[dict[str, str]] = None
         for name in self._forward_env:
-            value = os.environ.get(name)
-            if value is None:  # an allow-listed name may also come from Hermes' .env
-                if dotenv is None:
-                    dotenv = _hermes_dotenv()
-                value = dotenv.get(name)
+            value = _forwarded_value(name)
             if value is not None:
                 values[name] = value
             else:
@@ -1199,11 +1250,7 @@ class AppleContainerEnvironment(BaseEnvironment):
                      str(int(timeout) + _GUEST_TIMEOUT_GRACE_S), *inner]
         else:
             argv += inner
-        client_env = _client_env(env_values)
-        if client_env is not None:
-            proc = _popen_bash(argv, stdin_data, env=client_env)
-        else:
-            proc = _popen_bash(argv, stdin_data)
+        proc = _start_exec(argv, stdin_data, _client_env(env_values))
         proc._hermes_exec_token = token  # type: ignore[attr-defined]
         proc._hermes_guest_timeout = guest_timeout  # type: ignore[attr-defined]
         return proc
