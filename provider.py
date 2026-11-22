@@ -50,12 +50,34 @@ def unsupported_host_reason() -> Optional[str]:
     return None
 
 
+# What every program this plugin starts is given: the `container` CLI is not part of Hermes, and
+# Hermes' own environment holds every provider key loaded from the profile's .env. So it gets
+# this short list instead of a copy: the basics, the locale and time zone, the proxy settings
+# the CLI uses to pull images, and the CLI's own `CONTAINER_*` variables.
+_CLI_ENV_NAMES = frozenset({
+    "PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "SHELL", "LANG", "TZ",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+})
+_CLI_ENV_PREFIXES = ("LC_", "CONTAINER_")
+
+
+def cli_env(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """The environment for one `container` call. *extra* carries the values of variables the
+    user chose to forward into the sandbox, for the one call that names them with `-e NAME`."""
+    env = {name: value for name, value in os.environ.items()
+           if name in _CLI_ENV_NAMES or name.startswith(_CLI_ENV_PREFIXES)}
+    if extra:
+        env.update(extra)
+    return env
+
+
 def _translated_by_rosetta() -> bool:
     """True for an Intel build of Python running on Apple silicon."""
     try:
         probe = subprocess.run(["/usr/sbin/sysctl", "-n", "sysctl.proc_translated"],
                                capture_output=True, text=True, timeout=5,
-                               stdin=subprocess.DEVNULL, check=False)
+                               stdin=subprocess.DEVNULL, check=False, env=cli_env())
         return probe.stdout.strip() == "1"
     except (OSError, subprocess.SubprocessError):
         return False
@@ -259,7 +281,8 @@ class AppleContainerProvider(TerminalEnvironmentProvider):
             return False, "not-found"
         try:
             probe = subprocess.run([exe, "system", "status"], capture_output=True, text=True,
-                                   timeout=10, stdin=subprocess.DEVNULL, check=False)
+                                   timeout=10, stdin=subprocess.DEVNULL, check=False,
+                                   env=cli_env())
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.error("apple_container: `%s system status` failed: %s", exe, exc)
             return False, f"probe-error: {exc}"
